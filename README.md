@@ -1,1 +1,1 @@
-# comp3710
+# uq-edx-test
