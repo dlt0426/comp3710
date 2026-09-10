@@ -57,7 +57,7 @@ class OASISImages(Dataset):
 
 train_ds = OASISImages(os.path.join(DATA_ROOT, "keras_png_slices_train"), IMG_SIZE)
 train_loader = DataLoader(train_ds, batch_size=128, shuffle=True,
-                          num_workers=4, pin_memory=True)
+                          num_workers=2, pin_memory=True)
 print("Training images:", len(train_ds))
 
 # ----------------------------------------------------------------------
