@@ -58,22 +58,23 @@ test_tf = T.Compose([
     T.Normalize(CIFAR_MEAN, CIFAR_STD),
 ])
 
-# Download to a local ./data folder. On the cluster this needs one-off
-# internet access on the login node (see notes), or a pre-downloaded copy.
 train_set = torchvision.datasets.CIFAR10(
     root="./data", train=True, download=True, transform=train_tf)
 test_set = torchvision.datasets.CIFAR10(
     root="./data", train=False, download=True, transform=test_tf)
 
 BATCH = 512
+# more workers + persistent workers keeps the GPU fed and avoids per-epoch
+# worker startup cost, which shortens each epoch
 train_loader = DataLoader(train_set, batch_size=BATCH, shuffle=True,
-                          num_workers=4, pin_memory=True, drop_last=True)
-test_loader = DataLoader(test_set, batch_size=512, shuffle=False,
-                         num_workers=4, pin_memory=True)
+                          num_workers=8, pin_memory=True, drop_last=True,
+                          persistent_workers=True, prefetch_factor=4)
+test_loader = DataLoader(test_set, batch_size=1024, shuffle=False,
+                         num_workers=4, pin_memory=True,
+                         persistent_workers=True)
 
 # ----------------------------------------------------------------------
 # 2. DAWNBench-style ResNet (built from scratch)
-#    A compact residual net tuned for 32x32 CIFAR images.
 # ----------------------------------------------------------------------
 def conv_bn(c_in, c_out):
     return nn.Sequential(
@@ -95,10 +96,7 @@ class Residual(nn.Module):
 
 
 class FastResNet(nn.Module):
-    """
-    prep -> layer1(+res) -> layer2 -> layer3(+res) -> pool -> linear.
-    This is the David Page 'ResNet9' topology used for DAWNBench.
-    """
+    """prep -> layer1(+res) -> layer2 -> layer3(+res) -> pool -> linear."""
     def __init__(self, n_classes=10):
         super().__init__()
         self.prep = conv_bn(3, 64)
@@ -116,7 +114,7 @@ class FastResNet(nn.Module):
 
         self.pool = nn.AdaptiveMaxPool2d(1)
         self.fc = nn.Linear(512, n_classes)
-        self.scale = 0.125   # logit scaling, helps this net train stably
+        self.scale = 0.125
 
     def forward(self, x):
         x = self.prep(x)
@@ -129,27 +127,29 @@ class FastResNet(nn.Module):
 
 model = FastResNet().to(device)
 if device.type == "cuda":
-    model = model.to(memory_format=torch.channels_last)  # faster convs on Tensor Cores
+    model = model.to(memory_format=torch.channels_last)
 n_params = sum(p.numel() for p in model.parameters())
 print(f"Model parameters: {n_params/1e6:.2f}M")
 
 # ----------------------------------------------------------------------
 # 3. Loss, optimiser, OneCycle schedule, AMP scaler
 # ----------------------------------------------------------------------
-EPOCHS = 24
+EPOCHS = 28
 criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
 optimizer = torch.optim.SGD(model.parameters(), lr=0.0, momentum=0.9,
                             weight_decay=5e-4, nesterov=True)
 
 steps_per_epoch = len(train_loader)
 scheduler = torch.optim.lr_scheduler.OneCycleLR(
-    optimizer, max_lr=0.4, epochs=EPOCHS, steps_per_epoch=steps_per_epoch,
-    pct_start=0.3, div_factor=10, final_div_factor=100)
+    optimizer, max_lr=0.5, epochs=EPOCHS, steps_per_epoch=steps_per_epoch,
+    pct_start=0.25, div_factor=8, final_div_factor=200)
 
 scaler = GradScaler()
 
 # ----------------------------------------------------------------------
-# 4. Train
+# 4. Train.  To save time we only evaluate on the test set during the
+#    last few epochs (evaluation does not train the model, so skipping it
+#    early costs nothing but time).
 # ----------------------------------------------------------------------
 def evaluate():
     model.eval()
@@ -165,6 +165,8 @@ def evaluate():
     return correct / total
 
 
+EVAL_FROM = EPOCHS - 5   # only evaluate during the final 5 epochs
+
 print(f"\nTraining for {EPOCHS} epochs, batch size {BATCH}...")
 train_start = time.time()
 
@@ -176,10 +178,10 @@ for epoch in range(EPOCHS):
         yb = yb.to(device, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
-        with autocast():                       # mixed precision forward
+        with autocast():
             out = model(xb)
             loss = criterion(out, yb)
-        scaler.scale(loss).backward()          # scaled backward for fp16 stability
+        scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
         scheduler.step()
@@ -187,11 +189,17 @@ for epoch in range(EPOCHS):
 
     if device.type == "cuda":
         torch.cuda.synchronize()
-    acc = evaluate()
     elapsed = time.time() - train_start
-    print(f"Epoch {epoch+1:2d}/{EPOCHS}  "
-          f"loss={running_loss/steps_per_epoch:.3f}  "
-          f"test_acc={acc*100:.2f}%  elapsed={elapsed:.1f}s")
+
+    if epoch + 1 > EVAL_FROM:
+        acc = evaluate()
+        print(f"Epoch {epoch+1:2d}/{EPOCHS}  "
+              f"loss={running_loss/steps_per_epoch:.3f}  "
+              f"test_acc={acc*100:.2f}%  elapsed={elapsed:.1f}s")
+    else:
+        print(f"Epoch {epoch+1:2d}/{EPOCHS}  "
+              f"loss={running_loss/steps_per_epoch:.3f}  "
+              f"(eval skipped)  elapsed={elapsed:.1f}s")
 
 total_time = time.time() - train_start
 final_acc = evaluate()
