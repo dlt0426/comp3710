@@ -6,9 +6,9 @@ connections. Targets Dice similarity coefficient (DSC) > 0.9 for every
 label, with one-hot / categorical output as required.
 
 Data (on Rangpur):
-  /home/groups/comp3710/OASIS/keras_png_slices_train      (MRI, 256x256 grey)
-  /home/groups/comp3710/OASIS/keras_png_slices_seg_train  (labels 0,85,170,255)
-  ...and validate / test equivalents.
+  MRI : /home/groups/comp3710/OASIS/keras_png_slices_train/case_XXX_slice_Y.nii.png
+  SEG : /home/groups/comp3710/OASIS/keras_png_slices_seg_train/seg_XXX_slice_Y.nii.png
+  (the seg file matches the MRI file with "case_" replaced by "seg_")
 
 Segmentation label values {0, 85, 170, 255} are remapped to class
 indices {0, 1, 2, 3}.
@@ -47,34 +47,22 @@ LABEL_MAP = {0: 0, 85: 1, 170: 2, 255: 3}   # remap pixel values to class ids
 
 # ----------------------------------------------------------------------
 # 1. Dataset
+#    MRI file : case_XXX_slice_Y.nii.png  in keras_png_slices_<split>
+#    SEG file : seg_XXX_slice_Y.nii.png   in keras_png_slices_seg_<split>
+#    -> the seg path is the MRI basename with "case_" replaced by "seg_".
 # ----------------------------------------------------------------------
 class OASISDataset(Dataset):
     def __init__(self, img_dir, seg_dir):
         self.img_paths = sorted(glob.glob(os.path.join(img_dir, "*.png")))
         self.seg_dir = seg_dir
-        # segmentation files share the case/slice name but with a seg_ prefix
-        # difference; build a lookup by matching the case_xxx_slice_y part.
-        seg_paths = sorted(glob.glob(os.path.join(seg_dir, "*.png")))
-        # map "case_050_slice_1" -> full seg path
-        self.seg_lookup = {}
-        for p in seg_paths:
-            key = os.path.basename(p).replace("seg_", "")
-            self.seg_lookup[key] = p
 
     def __len__(self):
         return len(self.img_paths)
 
-    def _key(self, img_path):
-        # img basename like case_050_slice_1.nii.png
-        return os.path.basename(img_path)
-
     def __getitem__(self, idx):
         img_path = self.img_paths[idx]
-        key = self._key(img_path)
-        seg_path = self.seg_lookup.get(key, None)
-        if seg_path is None:
-            # fall back: same basename in seg dir
-            seg_path = os.path.join(self.seg_dir, key)
+        seg_name = os.path.basename(img_path).replace("case_", "seg_")
+        seg_path = os.path.join(self.seg_dir, seg_name)
 
         img = np.array(Image.open(img_path), dtype=np.float32) / 255.0
         seg = np.array(Image.open(seg_path))
@@ -93,14 +81,21 @@ def make_loader(split, batch, shuffle):
     img_dir = os.path.join(DATA_ROOT, f"keras_png_slices_{split}")
     seg_dir = os.path.join(DATA_ROOT, f"keras_png_slices_seg_{split}")
     ds = OASISDataset(img_dir, seg_dir)
+    # this partition's compute nodes have few CPU cores, so keep workers low
     return DataLoader(ds, batch_size=batch, shuffle=shuffle,
-                      num_workers=4, pin_memory=True)
+                      num_workers=2, pin_memory=True)
 
 
 train_loader = make_loader("train", batch=16, shuffle=True)
 val_loader = make_loader("validate", batch=16, shuffle=False)
 test_loader = make_loader("test", batch=16, shuffle=False)
 print("Train batches:", len(train_loader))
+
+# quick sanity check that MRI and SEG line up
+_dbg_ds = OASISDataset(os.path.join(DATA_ROOT, "keras_png_slices_train"),
+                       os.path.join(DATA_ROOT, "keras_png_slices_seg_train"))
+_img, _lab = _dbg_ds[0]
+print("sample img shape:", tuple(_img.shape), " label classes:", torch.unique(_lab).tolist())
 
 # ----------------------------------------------------------------------
 # 2. UNet
@@ -135,10 +130,10 @@ class UNet(nn.Module):
         self.out = nn.Conv2d(base, n_classes, 1)
 
     def forward(self, x):
-        c1 = self.d1(x)                 # skip 1
-        c2 = self.d2(self.pool(c1))     # skip 2
-        c3 = self.d3(self.pool(c2))     # skip 3
-        c4 = self.d4(self.pool(c3))     # skip 4
+        c1 = self.d1(x)
+        c2 = self.d2(self.pool(c1))
+        c3 = self.d3(self.pool(c2))
+        c4 = self.d4(self.pool(c3))
         b = self.bottleneck(self.pool(c4))
 
         x = self.u4(torch.cat([self.up4(b), c4], dim=1))
@@ -155,7 +150,6 @@ print("UNet parameters:", sum(p.numel() for p in model.parameters()) / 1e6, "M")
 # 3. Dice loss + Dice metric (one-hot / categorical)
 # ----------------------------------------------------------------------
 def dice_loss(logits, target, eps=1e-6):
-    """Soft Dice loss over one-hot targets."""
     probs = F.softmax(logits, dim=1)                        # (N, C, H, W)
     target_1h = F.one_hot(target, N_CLASSES).permute(0, 3, 1, 2).float()
     dims = (0, 2, 3)
@@ -166,7 +160,6 @@ def dice_loss(logits, target, eps=1e-6):
 
 
 def dice_per_class(logits, target, eps=1e-6):
-    """Hard Dice per class for evaluation."""
     preds = logits.argmax(1)                                # (N, H, W)
     dices = []
     for c in range(N_CLASSES):
@@ -256,6 +249,5 @@ plt.savefig("unet_segmentation.png", dpi=120)
 plt.close()
 print("\nSaved unet_segmentation.png")
 
-# save the model for the demo inference
 torch.save(model.state_dict(), "unet_oasis.pt")
 print("Saved unet_oasis.pt")
