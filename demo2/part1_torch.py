@@ -88,10 +88,10 @@ def naive_dft_torch(x):
     dev = x.device
     k = torch.arange(size, device=dev).reshape(size, 1)   # column vector
     n = torch.arange(size, device=dev).reshape(1, size)   # row vector
-    angle = 2.0 * np.pi * k * n / size                   # N x N real angles
-    W = torch.exp(-1j * angle)                             # N x N complex matrix
-    x_c = x.to(torch.complex128)
-    return W.to(torch.complex128) @ x_c
+    angle = -2.0 * np.pi * k * n / size                   # N x N real angles
+    W = torch.exp(1j * angle)                             # N x N complex matrix
+    x_c = x.to(torch.complex64)
+    return W.to(torch.complex64) @ x_c
 
 
 # ----------------------------------------------------------------------
