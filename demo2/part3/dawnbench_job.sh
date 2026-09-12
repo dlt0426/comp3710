@@ -13,4 +13,7 @@ nvidia-smi
 source $HOME/miniconda3/bin/activate
 conda activate torch
 
-python part3_dawnbench.py
+# Submit from the part3 directory. Forward arguments, e.g. --mode demo.
+set -e
+cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")}"
+python -u dawnbench.py "$@"
