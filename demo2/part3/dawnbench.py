@@ -16,6 +16,8 @@ from torch.nn import functional as F
 import torchvision
 
 
+# 1. Residual building block: learn a feature transformation and add the input.
+# The shortcut helps gradients flow through a deep network.
 class BasicBlock(nn.Module):
     expansion = 1
 
@@ -25,6 +27,7 @@ class BasicBlock(nn.Module):
         self.bn1 = nn.BatchNorm2d(channels)
         self.conv2 = nn.Conv2d(channels, channels, 3, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(channels)
+        # Use a 1x1 projection when the shortcut must match a new shape.
         self.shortcut = nn.Identity()
         if stride != 1 or in_channels != channels:
             self.shortcut = nn.Sequential(
@@ -38,6 +41,7 @@ class BasicBlock(nn.Module):
         return F.relu(out + self.shortcut(x))
 
 
+# 2. Model architecture: extract features in four stages, then classify them.
 class ResNet18(nn.Module):
     """[2, 2, 2, 2] BasicBlocks; CIFAR stem: 3x3, stride 1, no max pool.
 
@@ -50,12 +54,16 @@ class ResNet18(nn.Module):
             nn.Conv2d(3, 64, 3, padding=1, bias=False),
             nn.BatchNorm2d(64), nn.ReLU(inplace=True),
         )
+        # Stages produce 64/128/256/512 channels at 32/16/8/4 pixel resolution.
+        # Each stage contains two blocks, each with two 3x3 convolutions.
         self.layer1 = self._stage(64, 64, 1)
         self.layer2 = self._stage(64, 128, 2)
         self.layer3 = self._stage(128, 256, 2)
         self.layer4 = self._stage(256, 512, 2)
+        # Global average pooling gives one value per channel; fc outputs logits.
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Linear(512, n_classes)
+        # Kaiming initialization suits convolution layers followed by ReLU.
         for module in self.modules():
             if isinstance(module, nn.Conv2d):
                 nn.init.kaiming_normal_(module.weight, mode="fan_out", nonlinearity="relu")
@@ -70,11 +78,15 @@ class ResNet18(nn.Module):
         return self.fc(self.pool(x).flatten(1))
 
 
+# 3. Timing helper: wait for asynchronous GPU work before reading the clock.
 def sync(device):
     if device.type == "cuda":
         torch.cuda.synchronize(device)
 
 
+# 4. Data preparation: load a split and keep it on the selected device.
+# Convert NHWC uint8 images to NCHW floats, scale to [0, 1], then normalize
+# each RGB channel using fixed CIFAR-10 mean and standard deviation values.
 def load_data(root, train, device):
     ds = torchvision.datasets.CIFAR10(root=root, train=train, download=True)
     x = torch.tensor(ds.data, dtype=torch.float32, device=device).permute(0, 3, 1, 2) / 255
@@ -83,6 +95,8 @@ def load_data(root, train, device):
     return (x - mean) / std, torch.tensor(ds.targets, dtype=torch.long, device=device), ds.classes
 
 
+# 5. Mini-batches: shuffle and augment training images; keep test images fixed.
+# Include the last partial batch so an epoch visits every training image.
 def batches(x, y, batch_size, train=False):
     indices = torch.randperm(len(y), device=y.device) if train else torch.arange(len(y), device=y.device)
     for start in range(0, len(y), batch_size):
@@ -98,28 +112,39 @@ def batches(x, y, batch_size, train=False):
             xb = padded.permute(0, 2, 3, 1)[torch.arange(count, device=x.device)[:, None, None], rows, cols].permute(0, 3, 1, 2)
             flip = torch.rand(count, 1, 1, 1, device=x.device) < 0.5
             xb = torch.where(flip, xb.flip(3), xb)
+        # Channels-last changes memory layout for efficient GPU convolutions;
+        # the logical tensor dimensions remain (N, C, H, W).
         yield xb.contiguous(memory_format=torch.channels_last), y[idx]
 
 
+# 6. One training epoch: forward pass, loss, backpropagation, and weight update.
 def train_epoch(model, x, y, optimizer, scaler, scheduler, args, device):
+    # Training mode lets BatchNorm update its running statistics.
     model.train()
     total_loss = torch.zeros((), device=device)
     sync(device)
     start = time.perf_counter()
     for xb, yb in batches(x, y, args.batch_size, train=True):
+        # Clear previous gradients; autocast selects precision per operation.
         optimizer.zero_grad(set_to_none=True)
         with torch.autocast(device_type=device.type, enabled=args.amp):
+            # Cross entropy accepts raw logits and integer class labels.
+            # Label smoothing softens targets to discourage overconfidence.
             loss = F.cross_entropy(model(xb), yb, label_smoothing=0.1)
+        # Gradient scaling reduces underflow when using mixed precision.
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
         if scheduler is not None:
             scheduler.step()
+        # Weight batch losses by sample count to compute the epoch mean.
         total_loss += loss.detach() * len(yb)
     sync(device)
     return total_loss.item() / len(y), time.perf_counter() - start
 
 
+# 7. Inference and evaluation: predict without gradients or weight updates.
+# Evaluation mode uses the BatchNorm statistics learned during training.
 @torch.no_grad()
 def evaluate(model, x, y, classes, args, device, show=False):
     model.eval()
@@ -129,6 +154,7 @@ def evaluate(model, x, y, classes, args, device, show=False):
     start = time.perf_counter()
     for xb, yb in batches(x, y, args.batch_size):
         with torch.autocast(device_type=device.type, enabled=args.amp):
+            # The largest logit identifies the predicted class; no softmax needed.
             preds = model(xb).argmax(1)
         correct += (preds == yb).sum()
         if examples is None:
@@ -141,6 +167,7 @@ def evaluate(model, x, y, classes, args, device, show=False):
     return correct.item() / len(y), duration
 
 
+# 8. Command-line settings and execution modes.
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=["train", "inference", "demo"], default="train")
@@ -154,6 +181,7 @@ def main():
     args = parser.parse_args()
     if args.epochs < 1 or args.batch_size < 1:
         parser.error("epochs and batch-size must be positive")
+    # Enable mixed precision only on CUDA; CPU runs use full precision.
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     args.amp = device.type == "cuda" and not args.no_amp
     torch.manual_seed(0)
@@ -164,11 +192,14 @@ def main():
         print("GPU:", torch.cuda.get_device_name(device))
     if args.mode != "train" and not args.checkpoint.is_file():
         parser.error(f"Checkpoint not found: {args.checkpoint}. Run --mode train first.")
+    # Training starts with new weights; inference/demo restore saved weights.
     model = ResNet18().to(device=device, memory_format=torch.channels_last)
     if args.mode != "train":
         checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=True)
         model.load_state_dict(checkpoint["model"])
         print(f"Loaded checkpoint from epoch {checkpoint['epoch']}")
+    # Inference mode reports test accuracy and example predictions, then exits.
+    # Demo mode performs the same inference before its single training epoch.
     test_x, test_y, classes = load_data(args.data_dir, False, device)
     if args.mode != "train":
         acc, seconds = evaluate(model, test_x, test_y, classes, args, device, show=True)
@@ -176,14 +207,19 @@ def main():
         if args.mode == "inference":
             return
     train_x, train_y, _ = load_data(args.data_dir, True, device)
+    # SGD uses momentum and weight decay. Demo uses a small learning rate
+    # and a fresh optimizer; it does not resume the original optimizer state.
     optimizer = torch.optim.SGD(model.parameters(), lr=args.demo_lr if args.mode == "demo" else args.lr,
                                 momentum=0.9, weight_decay=5e-4, nesterov=True)
     scaler = torch.amp.GradScaler("cuda", enabled=args.amp)
+    # 9. Live demo: train one full epoch without overwriting the checkpoint.
     if args.mode == "demo":
         loss, seconds = train_epoch(model, train_x, train_y, optimizer, scaler, None, args, device)
         print(f"Demo: one complete training epoch ({len(train_y)} images), loss={loss:.4f}, time={seconds:.2f}s")
         print("Demo finished; saved checkpoint was not modified.")
         return
+    # 10. Full training: OneCycleLR raises then lowers the learning rate,
+    # updating it after each batch throughout the configured training run.
     steps = (len(train_y) + args.batch_size - 1) // args.batch_size
     scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=args.lr,
         epochs=args.epochs, steps_per_epoch=steps, pct_start=0.2)
@@ -194,6 +230,8 @@ def main():
         loss, seconds = train_epoch(model, train_x, train_y, optimizer, scaler, scheduler, args, device)
         training_seconds += seconds
         print(f"Epoch {epoch}/{args.epochs}: loss={loss:.4f}, time={seconds:.2f}s", flush=True)
+    # 11. Final evaluation and checkpoint: report measured performance and
+    # save weights plus metadata for later inference and demonstration.
     acc, inference_seconds = evaluate(model, test_x, test_y, classes, args, device, show=True)
     elapsed = time.perf_counter() - start
     args.checkpoint.parent.mkdir(parents=True, exist_ok=True)
@@ -207,5 +245,6 @@ def main():
     print(f"Saved: {args.checkpoint}")
 
 
+# Run the program only when executed directly, not when imported.
 if __name__ == "__main__":
     main()

@@ -13,9 +13,14 @@ Data (on Rangpur):
 Segmentation label values {0, 85, 170, 255} are remapped to class
 indices {0, 1, 2, 3}.
 
-Run on Rangpur with sbatch (A100).
+Run on Rangpur with an allocated GPU (A100):
+  python task2_unet.py --mode train
+  python task2_unet.py --mode inference --checkpoint unet_oasis.pt
+Inference loads saved weights and only needs the test split.
 """
 
+import argparse
+from pathlib import Path
 import os
 import glob
 import time
@@ -33,14 +38,6 @@ from torch.utils.data import Dataset, DataLoader
 # ----------------------------------------------------------------------
 # Setup
 # ----------------------------------------------------------------------
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print("Using device:", device)
-if device.type == "cuda":
-    print("GPU:", torch.cuda.get_device_name(0))
-    torch.backends.cudnn.benchmark = True
-
-torch.manual_seed(0)
-
 DATA_ROOT = "/home/groups/comp3710/OASIS"
 N_CLASSES = 4
 LABEL_MAP = {0: 0, 85: 1, 170: 2, 255: 3}   # remap pixel values to class ids
@@ -77,25 +74,16 @@ class OASISDataset(Dataset):
         return img, label
 
 
-def make_loader(split, batch, shuffle):
-    img_dir = os.path.join(DATA_ROOT, f"keras_png_slices_{split}")
-    seg_dir = os.path.join(DATA_ROOT, f"keras_png_slices_seg_{split}")
+def make_loader(split, batch, shuffle, data_root=DATA_ROOT):
+    img_dir = os.path.join(data_root, f"keras_png_slices_{split}")
+    seg_dir = os.path.join(data_root, f"keras_png_slices_seg_{split}")
     ds = OASISDataset(img_dir, seg_dir)
+    if not len(ds):
+        raise ValueError(f"No MRI PNG files found in {img_dir}")
     # this partition's compute nodes have few CPU cores, so keep workers low
     return DataLoader(ds, batch_size=batch, shuffle=shuffle,
                       num_workers=2, pin_memory=True)
 
-
-train_loader = make_loader("train", batch=16, shuffle=True)
-val_loader = make_loader("validate", batch=16, shuffle=False)
-test_loader = make_loader("test", batch=16, shuffle=False)
-print("Train batches:", len(train_loader))
-
-# quick sanity check that MRI and SEG line up
-_dbg_ds = OASISDataset(os.path.join(DATA_ROOT, "keras_png_slices_train"),
-                       os.path.join(DATA_ROOT, "keras_png_slices_seg_train"))
-_img, _lab = _dbg_ds[0]
-print("sample img shape:", tuple(_img.shape), " label classes:", torch.unique(_lab).tolist())
 
 # ----------------------------------------------------------------------
 # 2. UNet
@@ -143,9 +131,6 @@ class UNet(nn.Module):
         return self.out(x)              # logits (N, n_classes, H, W)
 
 
-model = UNet(N_CLASSES).to(device)
-print("UNet parameters:", sum(p.numel() for p in model.parameters()) / 1e6, "M")
-
 # ----------------------------------------------------------------------
 # 3. Dice loss + Dice metric (one-hot / categorical)
 # ----------------------------------------------------------------------
@@ -171,14 +156,10 @@ def dice_per_class(logits, target, eps=1e-6):
     return dices
 
 
-ce = nn.CrossEntropyLoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=8, gamma=0.5)
-
 # ----------------------------------------------------------------------
 # 4. Train
 # ----------------------------------------------------------------------
-def evaluate(loader):
+def evaluate(model, loader, device):
     model.eval()
     totals = np.zeros(N_CLASSES)
     n = 0
@@ -191,63 +172,107 @@ def evaluate(loader):
     return totals / n
 
 
-EPOCHS = 20
-print(f"\nTraining UNet for {EPOCHS} epochs...")
-start = time.time()
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mode", choices=["train", "inference"], default="train")
+    parser.add_argument("--checkpoint", type=Path, default=Path("unet_oasis.pt"))
+    parser.add_argument("--output", type=Path, default=Path("unet_segmentation.png"))
+    parser.add_argument("--data-root", default=DATA_ROOT)
+    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--batch-size", type=int, default=16)
+    args = parser.parse_args()
+    if args.epochs < 1 or args.batch_size < 1:
+        parser.error("epochs and batch-size must be positive")
+    if args.mode == "inference" and not args.checkpoint.is_file():
+        parser.error(f"Checkpoint not found: {args.checkpoint}. Train first or supply its path.")
 
-for epoch in range(EPOCHS):
-    model.train()
-    running = 0.0
-    for xb, yb in train_loader:
-        xb, yb = xb.to(device), yb.to(device)
-        optimizer.zero_grad()
-        out = model(xb)
-        loss = ce(out, yb) + dice_loss(out, yb)   # combined loss
-        loss.backward()
-        optimizer.step()
-        running += loss.item()
-    scheduler.step()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("Using device:", device)
+    if device.type == "cuda":
+        print("GPU:", torch.cuda.get_device_name(0))
+        torch.backends.cudnn.benchmark = True
 
-    val_dice = evaluate(val_loader)
-    elapsed = time.time() - start
-    print(f"Epoch {epoch+1:2d}/{EPOCHS}  loss={running/len(train_loader):.4f}  "
-          f"val DSC per class = [{', '.join(f'{d:.4f}' for d in val_dice)}]  "
-          f"mean={val_dice.mean():.4f}  ({elapsed:.0f}s)")
+    torch.manual_seed(0)
 
-# ----------------------------------------------------------------------
-# 5. Final test-set evaluation
-# ----------------------------------------------------------------------
-test_dice = evaluate(test_loader)
-print("\n--- Test set DSC per class ---")
-class_names = ["background", "label 1", "label 2", "label 3"]
-for name, d in zip(class_names, test_dice):
-    print(f"  {name:12s}: DSC = {d:.4f}  {'PASS' if d > 0.9 else 'FAIL'}")
-print(f"  mean DSC : {test_dice.mean():.4f}")
-print(f"  All labels > 0.9: {bool((test_dice > 0.9).all())}")
+    model = UNet(N_CLASSES).to(device)
+    print("UNet parameters:", sum(p.numel() for p in model.parameters()) / 1e6, "M")
 
-# ----------------------------------------------------------------------
-# 6. Visualise some segmentation results
-# ----------------------------------------------------------------------
-model.eval()
-xb, yb = next(iter(test_loader))
-xb = xb.to(device)
-with torch.no_grad():
-    preds = model(xb).argmax(1).cpu().numpy()
-xb = xb.cpu().numpy()
-yb = yb.numpy()
+    # Inference restores the original state_dict format, including BatchNorm buffers.
+    # It skips training data, optimizer construction, and checkpoint writing.
+    if args.mode == "inference":
+        state = torch.load(args.checkpoint, map_location=device, weights_only=True)
+        model.load_state_dict(state)
+        print(f"Loaded {args.checkpoint}")
+    test_loader = make_loader("test", args.batch_size, False, args.data_root)
+    if args.mode == "train":
+        train_loader = make_loader("train", args.batch_size, True, args.data_root)
+        val_loader = make_loader("validate", args.batch_size, False, args.data_root)
+        ce = nn.CrossEntropyLoss()
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=8, gamma=0.5)
 
-n_show = 4
-fig, axes = plt.subplots(n_show, 3, figsize=(9, 3 * n_show))
-for i in range(n_show):
-    axes[i, 0].imshow(xb[i, 0], cmap="gray"); axes[i, 0].set_title("MRI")
-    axes[i, 1].imshow(yb[i], cmap="viridis", vmin=0, vmax=3); axes[i, 1].set_title("Ground truth")
-    axes[i, 2].imshow(preds[i], cmap="viridis", vmin=0, vmax=3); axes[i, 2].set_title("Prediction")
-    for j in range(3):
-        axes[i, j].axis("off")
-plt.tight_layout()
-plt.savefig("unet_segmentation.png", dpi=120)
-plt.close()
-print("\nSaved unet_segmentation.png")
+        EPOCHS = args.epochs
+        print(f"\nTraining UNet for {EPOCHS} epochs...")
+        start = time.time()
 
-torch.save(model.state_dict(), "unet_oasis.pt")
-print("Saved unet_oasis.pt")
+        for epoch in range(EPOCHS):
+            model.train()
+            running = 0.0
+            for xb, yb in train_loader:
+                xb, yb = xb.to(device), yb.to(device)
+                optimizer.zero_grad()
+                out = model(xb)
+                loss = ce(out, yb) + dice_loss(out, yb)   # combined loss
+                loss.backward()
+                optimizer.step()
+                running += loss.item()
+            scheduler.step()
+
+            val_dice = evaluate(model, val_loader, device)
+            elapsed = time.time() - start
+            print(f"Epoch {epoch+1:2d}/{EPOCHS}  loss={running/len(train_loader):.4f}  "
+                  f"val DSC per class = [{', '.join(f'{d:.4f}' for d in val_dice)}]  "
+                  f"mean={val_dice.mean():.4f}  ({elapsed:.0f}s)")
+
+        # Save before plotting so trained weights survive a visualization failure.
+        args.checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(model.state_dict(), args.checkpoint)
+        print(f"Saved {args.checkpoint}")
+
+    # Both modes evaluate the test split and save MRI / truth / prediction panels.
+    test_dice = evaluate(model, test_loader, device)
+    print("\n--- Test set DSC per class ---")
+    class_names = ["background", "label 1", "label 2", "label 3"]
+    for name, d in zip(class_names, test_dice):
+        print(f"  {name:12s}: DSC = {d:.4f}  {'PASS' if d > 0.9 else 'FAIL'}")
+    print(f"  mean DSC : {test_dice.mean():.4f}")
+    print(f"  All labels > 0.9: {bool((test_dice > 0.9).all())}")
+
+    # ----------------------------------------------------------------------
+    # 6. Visualise some segmentation results
+    # ----------------------------------------------------------------------
+    model.eval()
+    xb, yb = next(iter(test_loader))
+    xb = xb.to(device)
+    with torch.no_grad():
+        preds = model(xb).argmax(1).cpu().numpy()
+    xb = xb.cpu().numpy()
+    yb = yb.numpy()
+
+    n_show = min(4, len(xb))
+    fig, axes = plt.subplots(n_show, 3, figsize=(9, 3 * n_show), squeeze=False)
+    for i in range(n_show):
+        axes[i, 0].imshow(xb[i, 0], cmap="gray"); axes[i, 0].set_title("MRI")
+        axes[i, 1].imshow(yb[i], cmap="viridis", vmin=0, vmax=3); axes[i, 1].set_title("Ground truth")
+        axes[i, 2].imshow(preds[i], cmap="viridis", vmin=0, vmax=3); axes[i, 2].set_title("Prediction")
+        for j in range(3):
+            axes[i, j].axis("off")
+    plt.tight_layout()
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(args.output, dpi=120)
+    plt.close()
+    print(f"\nSaved {args.output}")
+
+
+if __name__ == "__main__":
+    main()

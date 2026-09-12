@@ -91,6 +91,7 @@ class VAE(nn.Module):
         h = self.enc(x).flatten(1)
         return self.fc_mu(h), self.fc_logvar(h)
 
+    # z = μ + ε·σ（backpropagation works through this reparameterisation trick）
     def reparameterise(self, mu, logvar):
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
@@ -111,6 +112,8 @@ print("VAE parameters:", sum(p.numel() for p in model.parameters()) / 1e6, "M")
 
 # ----------------------------------------------------------------------
 # 3. VAE loss = reconstruction (BCE) + KL divergence
+# Their trade-off yields a latent space that is both faithful in
+# reconstruction and continuous and smooth.
 # ----------------------------------------------------------------------
 def vae_loss(recon, x, mu, logvar):
     bce = F.binary_cross_entropy(recon, x, reduction="sum")
@@ -122,6 +125,8 @@ optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
 # ----------------------------------------------------------------------
 # 4. Train
+# Feed the image into the model → reconstruction and the distribution parameters
+#  → compute the loss → backpropagate → update the parameters, using the Adam optimizer.
 # ----------------------------------------------------------------------
 EPOCHS = 20
 print(f"\nTraining VAE for {EPOCHS} epochs...")

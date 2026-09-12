@@ -22,9 +22,7 @@ matplotlib.use("Agg")  # headless backend: save figures instead of showing them
 import matplotlib.pyplot as plt
 import torch
 
-# ----------------------------------------------------------------------
 # Setup
-# ----------------------------------------------------------------------
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
 if device.type == "cuda":
@@ -34,9 +32,7 @@ T = 1.0    # signal duration (seconds)
 f0 = 1.0   # fundamental frequency (Hz)
 
 
-# ----------------------------------------------------------------------
 # 1. NumPy versions (kept for the CPU baseline / comparison)
-# ----------------------------------------------------------------------
 def square_wave_np(t):
     return np.sign(np.sin(2.0 * np.pi * f0 * t))
 
@@ -60,9 +56,7 @@ def naive_dft_np(x):
     return result
 
 
-# ----------------------------------------------------------------------
 # 2. PyTorch versions
-# ----------------------------------------------------------------------
 def square_wave_torch(t):
     return torch.sign(torch.sin(2.0 * np.pi * f0 * t))
 
@@ -94,9 +88,7 @@ def naive_dft_torch(x):
     return W.to(torch.complex64) @ x_c
 
 
-# ----------------------------------------------------------------------
 # 3. Harmonic reconstruction plot (accuracy & sharpness)
-# ----------------------------------------------------------------------
 N_plot = 2048
 t_np = np.linspace(0.0, T, N_plot, endpoint=False)
 square = square_wave_np(t_np)
@@ -126,9 +118,7 @@ plt.close()
 print("Saved harmonics.png")
 
 
-# ----------------------------------------------------------------------
 # 4. Correctness check: torch GPU DFT vs numpy FFT on a small signal
-# ----------------------------------------------------------------------
 N_check = 512
 t_check = np.linspace(0.0, T, N_check, endpoint=False)
 sig_np = square_wave_fourier_np(t_check, f0, 50)
@@ -139,9 +129,7 @@ fft_ref = np.fft.fft(sig_np)
 print("torch GPU DFT close to numpy FFT:", np.allclose(gpu_dft, fft_ref, atol=1e-3))
 
 
-# ----------------------------------------------------------------------
 # 5. Three-way timing benchmark across data sizes
-# ----------------------------------------------------------------------
 def time_numpy_naive(sig_np):
     start = time.time()
     naive_dft_np(sig_np)

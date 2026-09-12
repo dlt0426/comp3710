@@ -13,4 +13,7 @@ nvidia-smi
 source $HOME/miniconda3/bin/activate
 conda activate torch
 
-python task2_unet.py
+# Submit from part4; pass --mode inference to load saved weights.
+set -e
+cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")}"
+python -u task2_unet.py "$@"
