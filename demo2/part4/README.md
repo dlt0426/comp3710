@@ -1,8 +1,8 @@
-Part 4 Task 2：UNet inference
+ssh s4906926@rangpur.compute.eait.uq.edu.au
 
-cd demo2/part4
+cd ~/comp3710
 
-sbatch task2_unet_job.sh --mode inference --checkpoint unet_oasis.pt
+git pull --ff-only origin main
 
 Part 3.2：inference + one training epoch
 
@@ -10,8 +10,14 @@ cd ../part3
 
 sbatch dawnbench_job.sh --mode demo
 
+Part 4 Task 2：UNet inference
+
+cd demo2/part4
+
+sbatch task2_unet_job.sh --mode inference --checkpoint unet_oasis.pt
+
 output:
 
-tail -f unet_JOBID.out
+cat ~/comp3710/demo2/part4/unet_JOBID.out
 
-tail -f dawnbench_JOBID.out
+cat ~/comp3710/demo2/part3/dawnbench_JOBID.out
