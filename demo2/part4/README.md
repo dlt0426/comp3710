@@ -22,4 +22,7 @@ cat ~/comp3710/demo2/part3/dawnbench_JOBID.out
 
 cat ~/comp3710/demo2/part4/unet_JOBID.out
 
+scp s4906926@rangpur.compute.eait.uq.edu.au:~/comp3710/demo2/part4/unet_segmentation.png ~/Downloads/
+
+open ~/Downloads/unet_segmentation.png
 
