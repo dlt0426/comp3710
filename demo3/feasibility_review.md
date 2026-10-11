@@ -40,7 +40,8 @@ Patient overlap train∩val = train∩test = val∩test = **0**. Classes are bal
 | Slice (test) | 0.731 | 0.723 | 0.808 |
 | Patient (test) | 0.749 | 0.741 | 0.834 |
 
-Best val accuracy [ ] at epoch [ ]; peak VRAM [ ] MB; ~[ ] s/epoch. **Observation:** Unstable validation. Train loss falls smoothly, but val accuracy oscillates between 0.48 and 0.87, with several epochs collapsing to single-class predictions (≈0.5), until the cosine schedule lowers the LR (epoch ≥ 17). This suggests the LR is too high and BatchNorm statistics are unstable.
+**Observation:** Unstable validation. Train loss falls smoothly, but val accuracy oscillates between 0.48 and 0.87, with several epochs collapsing to single-class predictions (≈0.5), until the cosine schedule lowers the LR (epoch ≥ 17). This suggests the LR is too high and BatchNorm statistics are unstable.
+Large val→test gap. The selected checkpoint scores 0.932 patient-level accuracy on val but 0.749 on test (−18 pts). Validation is therefore over-optimistic, either because file IDs are scan IDs (repeat visits of one subject may fall in both train and val) or because epoch selection on an unstable curve is partly luck.
 
 ## 4. Risks, Budget & Fallback
 
