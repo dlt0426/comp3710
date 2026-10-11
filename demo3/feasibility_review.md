@@ -57,4 +57,4 @@ Large val→test gap. The selected checkpoint scores 0.932 patient-level accurac
 
 **Compute budget:** ConvNeXt-Tiny estimated ≈ 1–2 h per 50-epoch run; ~10 runs for tuning.
 **Next experiment:** implement ConvNeXt-Tiny in `modules.py`, train from scratch with identical settings, compare with the baseline.
-**Fallback:** if from-scratch ConvNeXt stays below 0.80, (a) initialise from ImageNet-pretrained weights *if permitted by teaching staff*, or (b) switch to 2.5D input with a smaller ConvNeXt; the baseline + calibration/reject-option analysis remains a complete deliverable either way.
+**Fallback:** if from-scratch ConvNeXt stays below 0.80, switch to 2.5D input with a smaller ConvNeXt; the baseline + calibration/reject-option analysis remains a complete deliverable either way.
