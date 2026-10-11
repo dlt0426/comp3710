@@ -37,10 +37,10 @@ Patient overlap train∩val = train∩test = val∩test = **0**. Classes are bal
 
 | Level | Accuracy | Macro-F1 | AUROC |
 |---|---|---|---|
-| Slice (test) | [ ] | [ ] | [ ] |
-| Patient (test) | [ ] | [ ] | [ ] |
+| Slice (test) | 0.731 | 0.723 | 0.808 |
+| Patient (test) | 0.749 | 0.741 | 0.834 |
 
-Best val accuracy [ ] at epoch [ ]; peak VRAM [ ] MB; ~[ ] s/epoch. **Observation:** [e.g. train acc reaches X while val plateaus at Y → overfitting; patient averaging adds +Z].
+Best val accuracy [ ] at epoch [ ]; peak VRAM [ ] MB; ~[ ] s/epoch. **Observation:** Unstable validation. Train loss falls smoothly, but val accuracy oscillates between 0.48 and 0.87, with several epochs collapsing to single-class predictions (≈0.5), until the cosine schedule lowers the LR (epoch ≥ 17). This suggests the LR is too high and BatchNorm statistics are unstable.
 
 ## 4. Risks, Budget & Fallback
 
